@@ -10,7 +10,7 @@
   "healthCheckPath": "/health/liveliness",
   "httpPort": 4000,
   "memoryLimit": 1610612736,
-  "minBoxVersion": "9.0.0",
+  "minBoxVersion": "9.1.0",
   "optionalSso": true,
   "addons": {
     "localstorage": {},
@@ -20,7 +20,8 @@
       "maxmemoryPolicy": "allkeys-lru"
     },
     "oidc": {
-      "loginRedirectUri": "/sso/callback"
+      "loginRedirectUri": "/sso/callback",
+      "logoutRedirectUri": "/"
     }
   },
   "configurePath": "/ui",
@@ -34,8 +35,7 @@
   "documentationUrl": "https://docs.litellm.ai/docs/simple_proxy",
   "forumUrl": "https://forum.cloudron.io/topic/13141/",
   "packagerName": "Melek Gharbi",
-  "packagerUrl": "https://github.com/manfromtunis/cloudron-litellm-app",
-  "packageUrl": "https://github.com/manfromtunis/cloudron-litellm-app",
+  "packagerUrl": "https://github.com/manfromtunis",
   "tags": [
     "ai",
     "llm",

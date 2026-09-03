@@ -8,8 +8,9 @@ Not affiliated with BerriAI. LiteLLM itself is MIT licensed; so is this package.
 
 ## Install
 
-The app is not in the official Cloudron App Store. Install it from this repository's
-community catalog:
+The app is not in the official Cloudron App Store. It is installed from this repository's
+community catalog, `CloudronVersions.json`, which is published with the first tagged release
+(see Releasing below):
 
 ```sh
 cloudron install --versions-url https://raw.githubusercontent.com/manfromtunis/cloudron-litellm-app/main/CloudronVersions.json --location litellm

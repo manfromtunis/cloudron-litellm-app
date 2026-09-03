@@ -16,7 +16,16 @@ PORT=14000
 
 remove_stack() {
     docker rm -f "${APP}" "${PG}" "${REDIS}" >/dev/null 2>&1 || true
-    docker volume rm "${VOL}" >/dev/null 2>&1 || true
+    # docker rm returns before the container is gone, so the volume it holds
+    # can still be busy; a leftover volume would silently make the next run
+    # start against a used /app/data.
+    local i
+    for i in $(seq 1 30); do
+        docker volume inspect "${VOL}" >/dev/null 2>&1 || break
+        docker volume rm "${VOL}" >/dev/null 2>&1 && break
+        [[ ${i} -eq 30 ]] && { echo "could not remove volume ${VOL}" >&2; exit 1; }
+        sleep 1
+    done
     docker network rm "${NET}" >/dev/null 2>&1 || true
 }
 
@@ -44,11 +53,11 @@ docker run -d --name "${PG}" --network "${NET}" \
 docker run -d --name "${REDIS}" --network "${NET}" \
     redis:7-alpine redis-server --requirepass testpassword >/dev/null
 
-for _ in $(seq 1 180); do
+for i in $(seq 1 180); do
     docker exec "${PG}" pg_isready -U litellm >/dev/null 2>&1 && break
+    [[ ${i} -eq 180 ]] && fail "postgres did not become ready"
     sleep 1
 done
-docker exec "${PG}" pg_isready -U litellm >/dev/null 2>&1 || fail "postgres did not become ready"
 
 start_app() {
     docker run -d --name "${APP}" --network "${NET}" \
@@ -71,7 +80,7 @@ wait_healthy() {
             echo "==> healthy after ${i}s"
             return 0
         fi
-        docker inspect -f '{{.State.Running}}' "${APP}" 2>/dev/null | grep -q true \
+        [[ "$(docker inspect -f '{{.State.Running}}' "${APP}" 2>/dev/null)" == true ]] \
             || { docker logs "${APP}"; fail "container exited"; }
         sleep 1
     done
@@ -79,49 +88,72 @@ wait_healthy() {
     fail "not healthy within 600s"
 }
 
-echo "==> [1/7] first boot on a read-only root filesystem"
+echo "==> [1/9] first boot on a read-only root filesystem"
 start_app
 wait_healthy
 
-MASTER_KEY="$(docker exec "${APP}" sed -n 's/^LITELLM_MASTER_KEY=//p' /app/data/env)"
-SALT_KEY="$(docker exec "${APP}" sed -n 's/^LITELLM_SALT_KEY=//p' /app/data/env)"
+secret() { docker exec "${APP}" sed -n "s/^$1=//p" /app/data/env; }
+secret_count() { docker exec "${APP}" grep -c "^$1=" /app/data/env; }
+
+MASTER_KEY="$(secret LITELLM_MASTER_KEY)"
+SALT_KEY="$(secret LITELLM_SALT_KEY)"
 [[ "${MASTER_KEY}" == sk-* ]] || fail "master key not generated (got '${MASTER_KEY}')"
 [[ -n "${SALT_KEY}" ]] || fail "salt key not generated"
 echo "==> master key generated"
 
-echo "==> [2/7] authenticated API responds"
+echo "==> [2/9] authenticated API responds"
 code="$(curl -s -o /tmp/models.json -w '%{http_code}' \
     -H "Authorization: Bearer ${MASTER_KEY}" "http://127.0.0.1:${PORT}/models")"
 [[ "${code}" == "200" ]] || { cat /tmp/models.json; fail "/models returned ${code}"; }
 
-echo "==> [3/7] unauthenticated API is rejected"
+echo "==> [3/9] unauthenticated API is rejected"
 code="$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:${PORT}/models")"
 [[ "${code}" == "401" || "${code}" == "403" ]] || fail "/models without a key returned ${code}"
 
-echo "==> [4/7] database schema was applied"
+echo "==> [4/9] database schema was applied"
 tables="$(docker exec "${PG}" psql -U litellm -d litellm -tAc \
     "select count(*) from information_schema.tables where table_schema='public' and table_name like 'LiteLLM%'")"
 [[ "${tables}" -gt 10 ]] || fail "expected LiteLLM tables in the database, found ${tables}"
 echo "==> ${tables} LiteLLM tables present"
 
-echo "==> [5/7] the admin UI is served"
+echo "==> [5/9] the admin UI is served"
 code="$(curl -s -o /tmp/ui.html -w '%{http_code}' -L "http://127.0.0.1:${PORT}/ui")"
 [[ "${code}" == "200" ]] || fail "/ui returned ${code}"
 grep -qi '<div id="__next"\|_next/static' /tmp/ui.html || fail "/ui did not return the dashboard HTML"
+code="$(curl -s -o /dev/null -w '%{http_code}' -L "http://127.0.0.1:${PORT}/ui/login")"
+[[ "${code}" == "200" ]] || fail "/ui/login returned ${code}"
 
-echo "==> [6/7] restart keeps the generated keys"
+echo "==> [6/9] restart keeps the generated keys"
 docker rm -f "${APP}" >/dev/null
 start_app
 wait_healthy
-MASTER_KEY2="$(docker exec "${APP}" sed -n 's/^LITELLM_MASTER_KEY=//p' /app/data/env)"
-SALT_KEY2="$(docker exec "${APP}" sed -n 's/^LITELLM_SALT_KEY=//p' /app/data/env)"
+MASTER_KEY2="$(secret LITELLM_MASTER_KEY)"
+SALT_KEY2="$(secret LITELLM_SALT_KEY)"
 [[ "${MASTER_KEY}" == "${MASTER_KEY2}" ]] || fail "master key changed across restart"
 [[ "${SALT_KEY}" == "${SALT_KEY2}" ]] || fail "salt key changed across restart"
-docker logs "${APP}" 2>&1 | grep -q "Database schema already applied" \
+[[ "$(secret_count LITELLM_SALT_KEY)" == "1" ]] || fail "a second salt key was appended"
+docker logs "${APP}" > /tmp/applog 2>&1
+grep -q "Database schema already applied" /tmp/applog \
     || fail "restart re-ran the migrations instead of skipping them"
 echo "==> restart skipped the migrations"
 
-echo "==> [7/7] SSO wiring points at the Cloudron provider"
+echo "==> [7/9] an env file with no trailing newline keeps its keys"
+docker exec "${APP}" sh -c 'printf "%s" "$(cat /app/data/env)" > /app/data/env.tmp && mv /app/data/env.tmp /app/data/env'
+docker restart "${APP}" >/dev/null
+wait_healthy
+[[ "$(secret_count LITELLM_SALT_KEY)" == "1" ]] || fail "a second salt key was appended"
+[[ "$(secret LITELLM_MASTER_KEY)" == "${MASTER_KEY}" ]] || fail "master key changed"
+
+echo "==> [8/9] a new LiteLLM version re-runs the migrations"
+docker exec "${APP}" sh -c 'echo 0.0.0-forced > /app/data/.schema-version'
+docker restart "${APP}" >/dev/null
+wait_healthy
+docker logs "${APP}" > /tmp/applog 2>&1
+grep -q "Applying database schema" /tmp/applog \
+    || fail "a changed LiteLLM version did not re-run the migrations"
+echo "==> migrations re-ran for the changed version"
+
+echo "==> [9/9] SSO wiring points at the Cloudron provider"
 docker rm -f "${APP}" >/dev/null
 start_app \
     -e CLOUDRON_OIDC_CLIENT_ID=testclient \

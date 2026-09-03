@@ -18,7 +18,8 @@ ENV VIRTUAL_ENV=/app/code/venv \
     PRISMA_CLI_QUERY_ENGINE_TYPE=binary \
     PRISMA_SKIP_POSTINSTALL_GENERATE=1 \
     PRISMA_HIDE_UPDATE_MESSAGE=1 \
-    LITELLM_NON_ROOT=true
+    LITELLM_UI_PATH=/app/code/ui \
+    LITELLM_VERSION=${LITELLM_VERSION}
 
 RUN python3 -m venv "${VIRTUAL_ENV}" \
     && "${VIRTUAL_ENV}/bin/pip" install --no-cache-dir --upgrade pip \
@@ -26,23 +27,32 @@ RUN python3 -m venv "${VIRTUAL_ENV}" \
         "litellm[proxy,extra_proxy,proxy-runtime]==${LITELLM_VERSION}"
 
 # The Prisma client is generated into the image: regenerating it would write
-# into site-packages, which is read-only at runtime. schema.prisma lives inside
-# the installed package, so its location is recorded for start.sh.
+# into site-packages, which is read-only at runtime. The exported admin UI is
+# lifted out of the package for the same reason — LiteLLM rewrites its UI
+# directory in place unless it is already laid out one directory per route,
+# which the assertion below is what guarantees.
 RUN set -eux; \
     schema="$(find "${VIRTUAL_ENV}/lib" -name schema.prisma -path '*litellm/proxy*' | head -n1)"; \
     test -n "${schema}"; \
-    dirname "${schema}" > /app/code/prisma-schema-dir; \
+    cp -r "$(dirname "${schema}")/_experimental/out" "${LITELLM_UI_PATH}"; \
+    test -f "${LITELLM_UI_PATH}/index.html"; \
+    test -f "${LITELLM_UI_PATH}/login/index.html"; \
+    touch "${LITELLM_UI_PATH}/.litellm_ui_ready"; \
     mkdir -p "${PRISMA_HOME_DIR}"; \
     "${VIRTUAL_ENV}/bin/prisma" generate --schema="${schema}"; \
     rm -rf "${PRISMA_HOME_DIR}/.npm" "${PRISMA_HOME_DIR}/.cache/checkpoint-nodejs" \
            "${PRISMA_NODEENV_CACHE_DIR}/src" \
-           "${PRISMA_NODEENV_CACHE_DIR}/share/man" "${PRISMA_NODEENV_CACHE_DIR}/share/doc"; \
+           "${PRISMA_NODEENV_CACHE_DIR}/include" \
+           "${PRISMA_NODEENV_CACHE_DIR}/lib/node_modules/npm" \
+           "${PRISMA_NODEENV_CACHE_DIR}/share/man" \
+           "${PRISMA_NODEENV_CACHE_DIR}/share/doc"; \
+    strip --strip-unneeded "${PRISMA_NODEENV_CACHE_DIR}/bin/node"; \
+    find "${PRISMA_HOME_DIR}" -name 'query-engine-linux-musl*' -delete; \
+    find "${PRISMA_HOME_DIR}" -name '*-debian-openssl-1.1.x' -delete; \
     test -x "${PRISMA_NODEENV_CACHE_DIR}/bin/node"
 
-RUN echo "${LITELLM_VERSION}" > /app/code/litellm-version
-
-COPY start.sh config.yaml.template env.template /app/code/
-RUN chmod +x /app/code/start.sh
+COPY --chmod=0755 start.sh /app/code/
+COPY config.yaml.template env.template /app/code/
 
 EXPOSE 4000
 
