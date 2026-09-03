@@ -7,9 +7,9 @@
   "version": "1.0.0",
   "upstreamVersion": "1.99.0",
   "manifestVersion": 2,
-  "healthCheckPath": "/health/liveliness",
+  "healthCheckPath": "/health/readiness",
   "httpPort": 4000,
-  "memoryLimit": 1610612736,
+  "memoryLimit": 3221225472,
   "minBoxVersion": "9.1.0",
   "optionalSso": true,
   "addons": {

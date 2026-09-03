@@ -5,7 +5,8 @@ LABEL org.opencontainers.image.source="https://github.com/manfromtunis/cloudron-
 ARG LITELLM_VERSION=1.99.0
 
 RUN apt-get update && apt-get install -y --no-install-recommends python3-venv \
-    && rm -rf /var/lib/apt/lists/*
+    && rm -rf /var/lib/apt/lists/* \
+    && for tool in openssl gosu psql flock; do command -v "${tool}" > /dev/null || exit 1; done
 
 # Everything Prisma needs — the CLI, its Node runtime and the query engines —
 # is resolved from these fixed image paths instead of $HOME, so nothing has to
@@ -24,7 +25,14 @@ ENV VIRTUAL_ENV=/app/code/venv \
 RUN python3 -m venv "${VIRTUAL_ENV}" \
     && "${VIRTUAL_ENV}/bin/pip" install --no-cache-dir --upgrade pip \
     && "${VIRTUAL_ENV}/bin/pip" install --no-cache-dir \
-        "litellm[proxy,extra_proxy,proxy-runtime]==${LITELLM_VERSION}"
+        "litellm[proxy,extra_proxy,proxy-runtime]==${LITELLM_VERSION}" \
+    && "${VIRTUAL_ENV}/bin/pip" uninstall -y litellm-enterprise
+
+# litellm-enterprise arrives as a dependency of the proxy extra, but it is not
+# MIT: its licence forbids redistribution, and this image is published. LiteLLM
+# imports it inside a try/except ImportError, so the proxy runs without it —
+# minus the enterprise-only features, which need a BerriAI subscription anyway.
+RUN ! "${VIRTUAL_ENV}/bin/python" -c "import litellm_enterprise" 2>/dev/null
 
 # The Prisma client is generated into the image: regenerating it would write
 # into site-packages, which is read-only at runtime. The exported admin UI is

@@ -49,7 +49,7 @@ docker volume create "${VOL}" >/dev/null
 echo "==> Starting postgres and redis"
 docker run -d --name "${PG}" --network "${NET}" \
     -e POSTGRES_USER=litellm -e POSTGRES_PASSWORD=litellm -e POSTGRES_DB=litellm \
-    postgres:16-alpine >/dev/null
+    postgres:14-alpine >/dev/null
 docker run -d --name "${REDIS}" --network "${NET}" \
     redis:7-alpine redis-server --requirepass testpassword >/dev/null
 
@@ -63,6 +63,7 @@ start_app() {
     docker run -d --name "${APP}" --network "${NET}" \
         --read-only --tmpfs /tmp --tmpfs /run \
         -v "${VOL}:/app/data" \
+        --memory=3072m --memory-swap=3072m \
         -p "127.0.0.1:${PORT}:4000" \
         -e "CLOUDRON_POSTGRESQL_URL=postgres://litellm:litellm@${PG}:5432/litellm" \
         -e "CLOUDRON_REDIS_HOST=${REDIS}" \
@@ -73,10 +74,11 @@ start_app() {
         "$@" "${IMAGE}" >/dev/null
 }
 
+# /health/readiness, unlike liveliness, reports the database as well.
 wait_healthy() {
     local i
     for i in $(seq 1 600); do
-        if curl -sf "http://127.0.0.1:${PORT}/health/liveliness" >/dev/null 2>&1; then
+        if curl -sf "http://127.0.0.1:${PORT}/health/readiness" >/dev/null 2>&1; then
             echo "==> healthy after ${i}s"
             return 0
         fi
@@ -88,7 +90,7 @@ wait_healthy() {
     fail "not healthy within 600s"
 }
 
-echo "==> [1/9] first boot on a read-only root filesystem"
+echo "==> [1/10] first boot on a read-only root filesystem"
 start_app
 wait_healthy
 
@@ -101,29 +103,41 @@ SALT_KEY="$(secret LITELLM_SALT_KEY)"
 [[ -n "${SALT_KEY}" ]] || fail "salt key not generated"
 echo "==> master key generated"
 
-echo "==> [2/9] authenticated API responds"
+echo "==> [2/10] authenticated API responds"
 code="$(curl -s -o /tmp/models.json -w '%{http_code}' \
     -H "Authorization: Bearer ${MASTER_KEY}" "http://127.0.0.1:${PORT}/models")"
 [[ "${code}" == "200" ]] || { cat /tmp/models.json; fail "/models returned ${code}"; }
 
-echo "==> [3/9] unauthenticated API is rejected"
+echo "==> [3/10] unauthenticated API is rejected"
 code="$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:${PORT}/models")"
 [[ "${code}" == "401" || "${code}" == "403" ]] || fail "/models without a key returned ${code}"
 
-echo "==> [4/9] database schema was applied"
+echo "==> [4/10] database schema was applied"
 tables="$(docker exec "${PG}" psql -U litellm -d litellm -tAc \
     "select count(*) from information_schema.tables where table_schema='public' and table_name like 'LiteLLM%'")"
 [[ "${tables}" -gt 10 ]] || fail "expected LiteLLM tables in the database, found ${tables}"
 echo "==> ${tables} LiteLLM tables present"
 
-echo "==> [5/9] the admin UI is served"
+echo "==> [5/10] the admin UI is served"
 code="$(curl -s -o /tmp/ui.html -w '%{http_code}' -L "http://127.0.0.1:${PORT}/ui")"
 [[ "${code}" == "200" ]] || fail "/ui returned ${code}"
 grep -qi '<div id="__next"\|_next/static' /tmp/ui.html || fail "/ui did not return the dashboard HTML"
 code="$(curl -s -o /dev/null -w '%{http_code}' -L "http://127.0.0.1:${PORT}/ui/login")"
 [[ "${code}" == "200" ]] || fail "/ui/login returned ${code}"
 
-echo "==> [6/9] restart keeps the generated keys"
+code="$(curl -s -o /tmp/cache.json -w '%{http_code}' \
+    -H "Authorization: Bearer ${MASTER_KEY}" "http://127.0.0.1:${PORT}/cache/ping")"
+[[ "${code}" == "200" ]] || { cat /tmp/cache.json; fail "the redis cache is not healthy (${code})"; }
+code="$(curl -s -o /dev/null -w '%{http_code}' -L "http://127.0.0.1:${PORT}/fallback/login")"
+[[ "${code}" == "200" ]] || fail "the master-key fallback login returned ${code}"
+[[ "$(docker exec "${APP}" sh -c 'ps -o user= -p 1' | tr -d ' ')" == "cloudron" ]] \
+    || fail "the proxy is running as root"
+[[ "$(docker exec "${APP}" stat -c '%U:%a' /app/data/env)" == "cloudron:600" ]] \
+    || fail "/app/data/env has the wrong owner or mode"
+[[ -z "$(docker exec "${APP}" sh -c 'ls /app/code/venv/lib/python3.12/site-packages | grep litellm_enterprise')" ]] \
+    || fail "the enterprise-licensed package is present in a published image"
+
+echo "==> [6/10] restart keeps the generated keys"
 docker rm -f "${APP}" >/dev/null
 start_app
 wait_healthy
@@ -137,23 +151,50 @@ grep -q "Database schema already applied" /tmp/applog \
     || fail "restart re-ran the migrations instead of skipping them"
 echo "==> restart skipped the migrations"
 
-echo "==> [7/9] an env file with no trailing newline keeps its keys"
-docker exec "${APP}" sh -c 'printf "%s" "$(cat /app/data/env)" > /app/data/env.tmp && mv /app/data/env.tmp /app/data/env'
+echo "==> [7/10] a regenerated salt key is refused while the database holds credentials"
+docker exec "${APP}" sh -c 'grep -v "^LITELLM_SALT_KEY=" /app/data/env > /app/data/e && mv /app/data/e /app/data/env'
+docker exec -i "${PG}" psql -U litellm -d litellm -q >/dev/null <<'SQL'
+insert into "LiteLLM_ProxyModelTable" (model_id, model_name, litellm_params, model_info, created_by, updated_by)
+values ('probe', 'probe', '{}', '{}', 'test', 'test');
+SQL
 docker restart "${APP}" >/dev/null
+for i in $(seq 1 60); do
+    [[ "$(docker inspect -f '{{.State.Running}}' "${APP}")" == false ]] && break
+    [[ ${i} -eq 60 ]] && fail "the app started and generated a new salt key over existing credentials"
+    sleep 1
+done
+docker logs "${APP}" > /tmp/applog 2>&1
+grep -q "LITELLM_SALT_KEY is missing" /tmp/applog || fail "no explanation was logged"
+docker exec -i "${PG}" psql -U litellm -d litellm -q >/dev/null <<'SQL'
+delete from "LiteLLM_ProxyModelTable" where model_id = 'probe';
+SQL
+echo "==> the app refused to boot rather than re-key"
+
+echo "==> [8/10] a key appended after a line with no trailing newline is not glued onto it"
+# The app is stopped by the previous check, so the volume is edited from a
+# throwaway container: the env file is left ending in someone else's key with
+# no trailing newline, which is what the appended salt could be glued onto.
+docker run --rm -v "${VOL}:/app/data" --entrypoint sh "${IMAGE}" -c \
+    'printf "%s\nOPENAI_API_KEY=sk-test" "$(cat /app/data/env)" > /app/data/e \
+     && mv /app/data/e /app/data/env && chown cloudron:cloudron /app/data/env'
+docker start "${APP}" >/dev/null
 wait_healthy
-[[ "$(secret_count LITELLM_SALT_KEY)" == "1" ]] || fail "a second salt key was appended"
+[[ "$(secret_count LITELLM_SALT_KEY)" == "1" ]] || fail "the salt key was appended onto the previous line"
+[[ "$(secret OPENAI_API_KEY)" == "sk-test" ]] || fail "the previous line was corrupted"
 [[ "$(secret LITELLM_MASTER_KEY)" == "${MASTER_KEY}" ]] || fail "master key changed"
 
-echo "==> [8/9] a new LiteLLM version re-runs the migrations"
-docker exec "${APP}" sh -c 'echo 0.0.0-forced > /app/data/.schema-version'
-docker restart "${APP}" >/dev/null
+echo "==> [9/10] a new LiteLLM version re-runs the migrations on the existing data"
+docker rm -f "${APP}" >/dev/null
+start_app -e LITELLM_VERSION=99.0.0-next
 wait_healthy
 docker logs "${APP}" > /tmp/applog 2>&1
 grep -q "Applying database schema" /tmp/applog \
     || fail "a changed LiteLLM version did not re-run the migrations"
-echo "==> migrations re-ran for the changed version"
+[[ "$(docker exec "${APP}" cat /app/data/.schema-version)" == "99.0.0-next" ]] \
+    || fail "the schema marker was not rewritten, so every later boot would re-migrate"
+echo "==> migrations re-ran and the marker was rewritten"
 
-echo "==> [9/9] SSO wiring points at the Cloudron provider"
+echo "==> [10/10] SSO wiring points at the Cloudron provider"
 docker rm -f "${APP}" >/dev/null
 start_app \
     -e CLOUDRON_OIDC_CLIENT_ID=testclient \

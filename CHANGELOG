@@ -1,4 +1,5 @@
 [1.0.0]
 * Initial package of LiteLLM 1.99.0.
-* PostgreSQL, Redis and optional Cloudron SSO wired up automatically.
-* Master key and salt key generated once into /app/data/env.
+* PostgreSQL, Redis and optional Cloudron SSO are wired up automatically.
+* The master key and salt key are generated once into /app/data/env.
+* Models are added from the Admin UI or /app/data/config.yaml.

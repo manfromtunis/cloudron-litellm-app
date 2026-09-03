@@ -58,7 +58,8 @@ copy your user id from **Internal Users** and set `PROXY_ADMIN_ID=<id>` in `/app
 then restart. LiteLLM's own SSO is free for up to 5 UI users; beyond that it needs a LiteLLM
 Enterprise licence.
 
-Installed **without SSO**, the master key is the only UI login. Either way, the API is
+Installed **without SSO**, the master key is the only UI login. If SSO breaks or locks you
+out, `/fallback/login` accepts the master key in either mode. Either way, the API is
 authenticated by LiteLLM's own keys, never by Cloudron's proxy, so API clients work
 identically in both modes.
 
@@ -71,7 +72,11 @@ identically in both modes.
 | Secrets | `LITELLM_MASTER_KEY` and `LITELLM_SALT_KEY` generated once into `/app/data/env` |
 | Schema migrations | Applied at start with `LITELLM_MIGRATION_DIR` pointing at a writable copy |
 | SSO | `CLOUDRON_OIDC_*` mapped to LiteLLM's generic OIDC variables |
-| Health | `/health/liveliness` |
+| Health | `/health/readiness`, which also reports the database |
+
+The app asks for 3 GB. The peak is the schema migration on a first install and
+after an update, measured at about 2.3 GB; steady-state serving is far below
+that. Lowering the limit risks the migration being killed part-way.
 
 **`LITELLM_SALT_KEY` must never change after installation.** It encrypts the provider
 credentials stored in the database; changing it makes them unreadable.
@@ -82,8 +87,15 @@ Both live in `/app/data`, survive updates and restarts, and are included in Clou
 
 * `config.yaml` — models, routing, fallbacks, caching.
   See the [LiteLLM config reference](https://docs.litellm.ai/docs/proxy/configs).
-* `env` — API keys and any LiteLLM environment variable. Values set here override the
-  package's own, so you can change anything the package configures.
+* `env` — API keys and any LiteLLM environment variable. It is read as shell, so quote
+  values containing a space or a dollar sign. Anything set here takes precedence over the
+  values this package derives from the platform. The listen port, host and config file are
+  command-line flags and cannot be changed here, and `HOME`, `TMPDIR`, `XDG_CACHE_HOME` and
+  `LITELLM_VERSION` should be left alone: they are what make the read-only filesystem work.
+
+`config.yaml` is seeded once, on first boot. Later versions of this package may ship a newer
+template, but an existing installation keeps the file it has; check the template in this
+repository when upgrading if something new is expected there.
 
 ## Development
 
