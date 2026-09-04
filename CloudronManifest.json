@@ -1,0 +1,48 @@
+{
+  "id": "ai.litellm.cloudronapp",
+  "title": "LiteLLM",
+  "author": "BerriAI",
+  "tagline": "OpenAI-compatible gateway to 100+ LLM providers",
+  "description": "file://DESCRIPTION.md",
+  "version": "1.0.0",
+  "upstreamVersion": "1.99.0",
+  "manifestVersion": 2,
+  "healthCheckPath": "/health/readiness",
+  "httpPort": 4000,
+  "memoryLimit": 3221225472,
+  "minBoxVersion": "9.1.0",
+  "optionalSso": true,
+  "addons": {
+    "localstorage": {},
+    "postgresql": {},
+    "redis": {
+      "persistent": false,
+      "maxmemoryPolicy": "allkeys-lru"
+    },
+    "oidc": {
+      "loginRedirectUri": "/sso/callback",
+      "logoutRedirectUri": "/"
+    }
+  },
+  "configurePath": "/ui",
+  "icon": "file://logo.png",
+  "iconUrl": "https://raw.githubusercontent.com/manfromtunis/cloudron-litellm-app/main/logo.png",
+  "mediaLinks": [
+    "https://raw.githubusercontent.com/manfromtunis/cloudron-litellm-app/main/media/screenshot.png"
+  ],
+  "website": "https://www.litellm.ai",
+  "contactEmail": "infos@art-guru.tech",
+  "documentationUrl": "https://docs.litellm.ai/docs/simple_proxy",
+  "forumUrl": "https://forum.cloudron.io/topic/13141/",
+  "packagerName": "Melek Gharbi",
+  "packagerUrl": "https://github.com/manfromtunis",
+  "tags": [
+    "ai",
+    "llm",
+    "openai",
+    "gateway",
+    "proxy"
+  ],
+  "changelog": "file://CHANGELOG",
+  "postInstallMessage": "file://POSTINSTALL.md"
+}

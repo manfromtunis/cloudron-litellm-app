@@ -1,0 +1,46 @@
+# LiteLLM configuration — https://docs.litellm.ai/docs/proxy/configs
+#
+# This file lives in /app/data/config.yaml and survives updates and restarts.
+# Provider API keys belong in /app/data/env, not here; reference them with
+# os.environ/NAME as shown below. Restart the app after editing.
+#
+# Models can also be added from the Admin UI (Models > Add Model) because
+# store_model_in_db is enabled — those live in the database, not in this file.
+
+model_list:
+  # - model_name: gpt-4o
+  #   litellm_params:
+  #     model: openai/gpt-4o
+  #     api_key: os.environ/OPENAI_API_KEY
+
+  # - model_name: claude-sonnet-4
+  #   litellm_params:
+  #     model: anthropic/claude-sonnet-4-20250514
+  #     api_key: os.environ/ANTHROPIC_API_KEY
+
+  # - model_name: gemini-2.5-flash
+  #   litellm_params:
+  #     model: gemini/gemini-2.5-flash
+  #     api_key: os.environ/GEMINI_API_KEY
+
+  # Any OpenAI-compatible endpoint, including another app on this Cloudron:
+  # - model_name: local-llama
+  #   litellm_params:
+  #     model: openai/llama3
+  #     api_base: https://ollama.example.com/v1
+  #     api_key: os.environ/OLLAMA_API_KEY
+
+litellm_settings:
+  drop_params: true
+  # Response caching in the Redis provided by Cloudron. Remove this block to
+  # disable caching.
+  cache: true
+  cache_params:
+    type: redis
+    host: os.environ/REDIS_HOST
+    port: os.environ/REDIS_PORT
+    password: os.environ/REDIS_PASSWORD
+
+general_settings:
+  master_key: os.environ/LITELLM_MASTER_KEY
+  database_connection_pool_limit: 10

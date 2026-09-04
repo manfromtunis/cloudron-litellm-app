@@ -1,0 +1,7 @@
+.git
+.github
+media
+test
+*.md
+LICENSE
+CloudronVersions.json

@@ -1,0 +1,102 @@
+name: Build
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+    tags: ['v*']
+  workflow_dispatch:
+
+env:
+  IMAGE: ghcr.io/manfromtunis/cloudron-litellm-app
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Compute image tag
+        id: tag
+        run: |
+          if [ "${{ github.ref_type }}" = "tag" ]; then
+            echo "value=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+            echo "push=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "value=dev" >> "$GITHUB_OUTPUT"
+            echo "push=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Validate package
+        run: |
+          set -euo pipefail
+          version="$(jq -r .version CloudronManifest.json)"
+          jq -e '.id and .version and .httpPort and .healthCheckPath' CloudronManifest.json > /dev/null
+          # every value the manifest duplicates from somewhere else
+          test "${version}" = "$(sed -n 's/^\[\(.*\)\]$/\1/p' CHANGELOG | head -n1)"
+          test "$(jq -r .upstreamVersion CloudronManifest.json)" = "$(sed -n 's/^ARG LITELLM_VERSION=//p' Dockerfile)"
+          grep -q "LiteLLM $(jq -r .upstreamVersion CloudronManifest.json)" CHANGELOG
+          port="$(jq -r .httpPort CloudronManifest.json)"
+          grep -q "^EXPOSE ${port}$" Dockerfile
+          grep -q "^PORT=${port}$" start.sh
+          # a published version can never be corrected, so the tag must be the
+          # version that is actually inside the image it names
+          if [ "${{ github.ref_type }}" = "tag" ]; then
+            test "${GITHUB_REF_NAME#v}" = "${version}"
+          fi
+          # every file:// the manifest points at must exist
+          for f in $(jq -r '..|strings|select(startswith("file://"))|ltrimstr("file://")' CloudronManifest.json); do
+            test -f "${f}" || { echo "manifest references missing ${f}"; exit 1; }
+          done
+          bash -n start.sh test/local-run.sh
+          shellcheck start.sh test/local-run.sh
+
+      - uses: docker/setup-buildx-action@b5ca514318bd6ebac0fb2aedd5d36ec1b5c232a2 # v3.10.0
+
+      - name: Build
+        uses: docker/build-push-action@471d1dc4e07e5cdedd4c2171150001c434f0b7a4 # v6.15.0
+        with:
+          context: .
+          platforms: linux/amd64
+          load: true
+          tags: ${{ env.IMAGE }}:${{ steps.tag.outputs.value }}
+          cache-from: type=gha,scope=build
+          cache-to: type=gha,scope=build,mode=min
+
+      # The package's real gate, and it runs before anything is published: the
+      # image is started the way Cloudron starts it, with a read-only root
+      # filesystem and a live PostgreSQL and Redis.
+      - name: Run the package under Cloudron's constraints
+        run: ./test/local-run.sh "${IMAGE}:${{ steps.tag.outputs.value }}"
+
+      - name: Log in to GHCR
+        if: steps.tag.outputs.push == 'true'
+        uses: docker/login-action@9780b0c442fbb1117ed29e0efdff1e18412f7567 # v3.3.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # A catalog entry names an image tag, and a published entry can never be
+      # corrected — so the tag it names must never be rewritten either.
+      - name: Refuse to overwrite a published tag
+        if: steps.tag.outputs.push == 'true'
+        run: |
+          # Only an explicit "not found" clears the push. Any other failure —
+          # a registry error, a rate limit, an expired token — is treated as
+          # unknown rather than as permission to overwrite a release.
+          if err="$(docker manifest inspect "${IMAGE}:${{ steps.tag.outputs.value }}" 2>&1)"; then
+            echo "::error::${IMAGE}:${{ steps.tag.outputs.value }} already exists. Published versions are immutable: bump the version instead."
+            exit 1
+          fi
+          if ! grep -qiE 'manifest unknown|not found|no such manifest' <<< "${err}"; then
+            echo "::error::could not determine whether ${IMAGE}:${{ steps.tag.outputs.value }} exists: ${err}"
+            exit 1
+          fi
+
+      - name: Push the tested image
+        if: steps.tag.outputs.push == 'true'
+        run: docker push "${IMAGE}:${{ steps.tag.outputs.value }}"
