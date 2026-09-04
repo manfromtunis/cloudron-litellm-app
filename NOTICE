@@ -21,6 +21,13 @@ identify the software being packaged. This package is not produced, endorsed or
 supported by BerriAI; please report packaging problems to this repository and
 LiteLLM problems upstream.
 
+The image is not wholly MIT. Beyond LiteLLM it contains that project's Python
+dependencies and an Ubuntu base, whose licences include Apache-2.0, MPL-2.0
+(certifi, orjson, tqdm), LGPL-2.1 (the libsndfile shared library that arrives
+with soundfile) and GPL-3.0-with-GCC-exception (libgfortran and libquadmath,
+which arrive with numpy). Each distribution carries its own licence text
+inside the image, under its .dist-info directory.
+
 The packaging in this repository — the Dockerfile, start script, manifest,
 templates, tests and documentation — is copyright (c) 2026 Melek Gharbi and is
 licensed under the MIT License in LICENSE.

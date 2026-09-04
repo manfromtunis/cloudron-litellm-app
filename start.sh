@@ -9,6 +9,9 @@ SCHEMA_MARKER="${DATA_DIR}/.schema-version"
 PORT=4000
 
 : "${CLOUDRON_POSTGRESQL_URL:?is required — is the postgresql addon enabled?}"
+: "${CLOUDRON_REDIS_HOST:?is required — is the redis addon enabled?}"
+: "${CLOUDRON_REDIS_PORT:?is required — is the redis addon enabled?}"
+: "${CLOUDRON_REDIS_PASSWORD:?is required — is the redis addon enabled?}"
 : "${CLOUDRON_APP_ORIGIN:?is required}"
 
 # --- 1. the only work that needs root -------------------------------------
@@ -23,11 +26,16 @@ if [[ "$(id -u)" -eq 0 ]]; then
     exec gosu cloudron:cloudron "$0" "$@"
 fi
 
+mkdir -p "${RUN_DIR}/.cache" "${RUN_DIR}/migrations"
+
 # The version baked into the image. Captured before the user's env file is
 # sourced, so that setting LITELLM_VERSION there cannot suppress migrations.
 IMAGE_LITELLM_VERSION="${LITELLM_VERSION}"
 
-db() { psql "${CLOUDRON_POSTGRESQL_URL}" -tAc "$1" 2>/dev/null; }
+# The URL is passed in rather than read from a global: the secret guard below
+# must always ask the addon's database, while the schema check must ask
+# whichever database the proxy will actually use.
+db() { psql "$1" -tAc "$2"; }
 
 # --- 2. first run: templates and secrets ----------------------------------
 [[ -s "${CONFIG_FILE}" ]] || { cp /app/code/config.yaml.template "${CONFIG_FILE}"; chmod 600 "${CONFIG_FILE}"; }
@@ -38,8 +46,8 @@ db() { psql "${CLOUDRON_POSTGRESQL_URL}" -tAc "$1" 2>/dev/null; }
 # match the guard below forever.
 random_hex() {
     local bytes="$1" value
-    value="$(openssl rand -hex "${bytes}")" || { echo "ERROR: openssl rand failed" >&2; exit 1; }
-    [[ ${#value} -eq $(( bytes * 2 )) ]] || { echo "ERROR: openssl returned a short value" >&2; exit 1; }
+    value="$(openssl rand -hex "${bytes}")" || return 1
+    [[ ${#value} -eq $(( bytes * 2 )) ]] || return 1
     printf '%s' "${value}"
 }
 
@@ -55,22 +63,50 @@ append_secret() {
 # check below refuses to invent a new one for a database that already holds
 # credentials — the case where the env file was deleted but the data was not.
 exec 9>"${DATA_DIR}/.env.lock"
-flock 9
+flock -w 60 9 || { echo "ERROR: another instance is holding ${DATA_DIR}/.env.lock" >&2; exit 1; }
 
-if ! grep -qE '^LITELLM_SALT_KEY=' "${ENV_FILE}" \
-   && [[ "$(db 'select 1 from "LiteLLM_ProxyModelTable" limit 1')" == "1" ]]; then
-    echo "ERROR: the database holds encrypted credentials but LITELLM_SALT_KEY is missing" >&2
-    echo "from /app/data/env. Restore that file from a backup — generating a new key would" >&2
-    echo "make those credentials permanently unreadable." >&2
-    exit 1
+if ! grep -qE '^LITELLM_SALT_KEY=' "${ENV_FILE}"; then
+    # A missing salt key means either a first install or a lost env file, and
+    # the difference is only visible in the database. Answering that question
+    # requires the database to actually answer: treating "cannot connect" as
+    # "no credentials" would mint a new key over an existing installation,
+    # which is the exact accident this guard exists to prevent.
+    for attempt in $(seq 1 30); do
+        db "${CLOUDRON_POSTGRESQL_URL}" 'select 1' >/dev/null 2>&1 && break
+        if [[ "${attempt}" -eq 30 ]]; then
+            echo "ERROR: no LITELLM_SALT_KEY in /app/data/env and the database cannot be" >&2
+            echo "reached, so it is not safe to generate one. Refusing to start." >&2
+            exit 1
+        fi
+        sleep 2
+    done
+
+    # Every table whose rows are encrypted with the salt key. Each is probed
+    # separately because on a first install none of them exist yet.
+    for table in LiteLLM_CredentialsTable LiteLLM_ProxyModelTable LiteLLM_MCPServerTable; do
+        if [[ -n "$(db "${CLOUDRON_POSTGRESQL_URL}" "select 1 from \"${table}\" limit 1" 2>/dev/null)" ]]; then
+            echo "ERROR: the database holds encrypted credentials but LITELLM_SALT_KEY is missing" >&2
+            echo "from /app/data/env. Restore that file from a backup — generating a new key would" >&2
+            echo "make those credentials permanently unreadable." >&2
+            exit 1
+        fi
+    done
 fi
 
 # Without a trailing newline the appends would glue the key onto the last
 # line, hiding it from the grep above and regenerating it on every boot.
 [[ -z "$(tail -c1 "${ENV_FILE}")" ]] || printf '\n' >> "${ENV_FILE}"
 
-append_secret LITELLM_MASTER_KEY "sk-$(random_hex 24)"
-append_secret LITELLM_SALT_KEY "$(random_hex 32)"
+# Generated into variables first: a command substitution that fails inside an
+# argument has its status discarded, so `append_secret NAME "$(...)"` would
+# write an empty key and carry on. A plain assignment propagates the failure.
+gen_failed() { echo "ERROR: could not generate a random key — openssl rand failed" >&2; exit 1; }
+master_key="sk-$(random_hex 24)" || gen_failed
+salt_key="$(random_hex 32)" || gen_failed
+[[ -n "${master_key#sk-}" && -n "${salt_key}" ]] || gen_failed
+
+append_secret LITELLM_MASTER_KEY "${master_key}"
+append_secret LITELLM_SALT_KEY "${salt_key}"
 chmod 600 "${ENV_FILE}"
 
 exec 9>&-
@@ -134,7 +170,8 @@ set +o allexport -u
 # Whether the tables exist, not whether they hold rows: a freshly migrated
 # database is empty.
 schema_present() {
-    [[ "$(db "select 1 from information_schema.tables where table_name = 'LiteLLM_UserTable'")" == "1" ]]
+    [[ "$(db "${DATABASE_URL}" "select 1 from information_schema.tables \
+        where table_schema = 'public' and table_name = 'LiteLLM_UserTable'" 2>/dev/null)" == "1" ]]
 }
 
 if [[ "$(cat "${SCHEMA_MARKER}" 2>/dev/null || true)" == "${IMAGE_LITELLM_VERSION}" ]] && schema_present; then
@@ -145,13 +182,25 @@ else
     # script is PID 1, which ignores signals with a default disposition. A
     # stop during a migration would become a SIGKILL, leaving a half-applied
     # migration that every later boot refuses to move past.
+    # The trap is installed first: between starting the child and installing
+    # it, this script is still PID 1 with a default disposition, which drops
+    # the signal outright.
+    migrate_pid=""
+    trap 'kill -TERM "${migrate_pid:-}" 2>/dev/null || true' TERM INT
     DISABLE_SCHEMA_UPDATE=False /app/code/venv/bin/litellm --skip_server_startup \
         --enforce_prisma_migration_check --use_v2_migration_resolver &
     migrate_pid=$!
-    trap 'kill -TERM "${migrate_pid}" 2>/dev/null || true' TERM INT
+    # A trapped signal interrupts `wait` and it returns 128+signal while the
+    # child is still running, so waiting once would forward SIGTERM and then
+    # abandon the migration a few milliseconds later — the very thing the
+    # trap exists to prevent. Wait again until the child is really gone.
     set +e
-    wait "${migrate_pid}"
-    migrate_status=$?
+    while true; do
+        wait "${migrate_pid}"
+        migrate_status=$?
+        [[ ${migrate_status} -gt 128 ]] && kill -0 "${migrate_pid}" 2>/dev/null && continue
+        break
+    done
     set -e
     trap - TERM INT
     [[ ${migrate_status} -eq 0 ]] || {

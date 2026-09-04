@@ -80,6 +80,16 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      # A catalog entry names an image tag, and a published entry can never be
+      # corrected — so the tag it names must never be rewritten either.
+      - name: Refuse to overwrite a published tag
+        if: steps.tag.outputs.push == 'true'
+        run: |
+          if docker manifest inspect "${IMAGE}:${{ steps.tag.outputs.value }}" > /dev/null 2>&1; then
+            echo "::error::${IMAGE}:${{ steps.tag.outputs.value }} already exists. Published versions are immutable: bump the version instead."
+            exit 1
+          fi
+
       - name: Push the tested image
         if: steps.tag.outputs.push == 'true'
         run: docker push "${IMAGE}:${{ steps.tag.outputs.value }}"

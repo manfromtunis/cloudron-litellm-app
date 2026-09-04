@@ -32,7 +32,10 @@ RUN python3 -m venv "${VIRTUAL_ENV}" \
 # MIT: its licence forbids redistribution, and this image is published. LiteLLM
 # imports it inside a try/except ImportError, so the proxy runs without it —
 # minus the enterprise-only features, which need a BerriAI subscription anyway.
-RUN ! "${VIRTUAL_ENV}/bin/python" -c "import litellm_enterprise" 2>/dev/null
+# Asserted through the interpreter rather than with a negated import, which
+# would also "pass" if python itself were broken.
+RUN "${VIRTUAL_ENV}/bin/python" -c \
+    "import importlib.util, litellm, sys; sys.exit(1 if importlib.util.find_spec('litellm_enterprise') else 0)"
 
 # The Prisma client is generated into the image: regenerating it would write
 # into site-packages, which is read-only at runtime. The exported admin UI is

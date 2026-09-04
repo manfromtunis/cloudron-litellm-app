@@ -13,6 +13,24 @@ REDIS=litellm-test-redis
 APP=litellm-test-app
 VOL=litellm-test-data
 PORT=14000
+HERE="$(cd -- "$(dirname -- "$0")" && pwd)"
+# The memory limit is the manifest's, so the two cannot drift: a limit that is
+# too small to migrate under must fail here rather than on someone's install.
+MEM="$(jq -r .memoryLimit "${HERE}/../CloudronManifest.json")"
+
+# docker rm returns before the container is really gone, so the volume it
+# held can still be busy. Swallowing that failure would silently reuse a
+# populated /app/data and make a first-boot check test nothing.
+fresh_volume() {
+    local i
+    for i in $(seq 1 30); do
+        docker volume inspect "${VOL}" >/dev/null 2>&1 || break
+        docker volume rm "${VOL}" >/dev/null 2>&1 && break
+        [[ ${i} -eq 30 ]] && fail "could not remove the data volume ${VOL}"
+        sleep 1
+    done
+    docker volume create "${VOL}" >/dev/null
+}
 
 remove_stack() {
     docker rm -f "${APP}" "${PG}" "${REDIS}" >/dev/null 2>&1 || true
@@ -63,7 +81,7 @@ start_app() {
     docker run -d --name "${APP}" --network "${NET}" \
         --read-only --tmpfs /tmp --tmpfs /run \
         -v "${VOL}:/app/data" \
-        --memory=3072m --memory-swap=3072m \
+        --memory="${MEM}" --memory-swap="${MEM}" \
         -p "127.0.0.1:${PORT}:4000" \
         -e "CLOUDRON_POSTGRESQL_URL=postgres://litellm:litellm@${PG}:5432/litellm" \
         -e "CLOUDRON_REDIS_HOST=${REDIS}" \
@@ -90,7 +108,7 @@ wait_healthy() {
     fail "not healthy within 600s"
 }
 
-echo "==> [1/10] first boot on a read-only root filesystem"
+echo "==> [1/13] first boot on a read-only root filesystem"
 start_app
 wait_healthy
 
@@ -103,22 +121,22 @@ SALT_KEY="$(secret LITELLM_SALT_KEY)"
 [[ -n "${SALT_KEY}" ]] || fail "salt key not generated"
 echo "==> master key generated"
 
-echo "==> [2/10] authenticated API responds"
+echo "==> [2/13] authenticated API responds"
 code="$(curl -s -o /tmp/models.json -w '%{http_code}' \
     -H "Authorization: Bearer ${MASTER_KEY}" "http://127.0.0.1:${PORT}/models")"
 [[ "${code}" == "200" ]] || { cat /tmp/models.json; fail "/models returned ${code}"; }
 
-echo "==> [3/10] unauthenticated API is rejected"
+echo "==> [3/13] unauthenticated API is rejected"
 code="$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:${PORT}/models")"
 [[ "${code}" == "401" || "${code}" == "403" ]] || fail "/models without a key returned ${code}"
 
-echo "==> [4/10] database schema was applied"
+echo "==> [4/13] database schema was applied"
 tables="$(docker exec "${PG}" psql -U litellm -d litellm -tAc \
     "select count(*) from information_schema.tables where table_schema='public' and table_name like 'LiteLLM%'")"
 [[ "${tables}" -gt 10 ]] || fail "expected LiteLLM tables in the database, found ${tables}"
 echo "==> ${tables} LiteLLM tables present"
 
-echo "==> [5/10] the admin UI is served"
+echo "==> [5/13] the admin UI is served"
 code="$(curl -s -o /tmp/ui.html -w '%{http_code}' -L "http://127.0.0.1:${PORT}/ui")"
 [[ "${code}" == "200" ]] || fail "/ui returned ${code}"
 grep -qi '<div id="__next"\|_next/static' /tmp/ui.html || fail "/ui did not return the dashboard HTML"
@@ -134,10 +152,11 @@ code="$(curl -s -o /dev/null -w '%{http_code}' -L "http://127.0.0.1:${PORT}/fall
     || fail "the proxy is running as root"
 [[ "$(docker exec "${APP}" stat -c '%U:%a' /app/data/env)" == "cloudron:600" ]] \
     || fail "/app/data/env has the wrong owner or mode"
-[[ -z "$(docker exec "${APP}" sh -c 'ls /app/code/venv/lib/python3.12/site-packages | grep litellm_enterprise')" ]] \
+docker run --rm --entrypoint /app/code/venv/bin/python "${IMAGE}" -c \
+    "import importlib.util, litellm, sys; sys.exit(1 if importlib.util.find_spec('litellm_enterprise') else 0)" \
     || fail "the enterprise-licensed package is present in a published image"
 
-echo "==> [6/10] restart keeps the generated keys"
+echo "==> [6/13] restart keeps the generated keys"
 docker rm -f "${APP}" >/dev/null
 start_app
 wait_healthy
@@ -151,7 +170,18 @@ grep -q "Database schema already applied" /tmp/applog \
     || fail "restart re-ran the migrations instead of skipping them"
 echo "==> restart skipped the migrations"
 
-echo "==> [7/10] a regenerated salt key is refused while the database holds credentials"
+echo "==> [7/13] LITELLM_VERSION in the user's env file cannot suppress migrations"
+docker run --rm -v "${VOL}:/app/data" --entrypoint sh "${IMAGE}" -c \
+    'printf "LITELLM_VERSION=0.0.1-user\n" >> /app/data/env'
+docker restart "${APP}" >/dev/null
+wait_healthy
+[[ "$(docker exec "${APP}" cat /app/data/.schema-version)" != "0.0.1-user" ]] \
+    || fail "the schema marker took its version from the user's env file"
+docker run --rm -v "${VOL}:/app/data" --entrypoint sh "${IMAGE}" -c \
+    'grep -v "^LITELLM_VERSION=" /app/data/env > /app/data/e && mv /app/data/e /app/data/env'
+echo "==> the marker kept the image's version"
+
+echo "==> [8/13] a regenerated salt key is refused while the database holds credentials"
 docker exec "${APP}" sh -c 'grep -v "^LITELLM_SALT_KEY=" /app/data/env > /app/data/e && mv /app/data/e /app/data/env'
 docker exec -i "${PG}" psql -U litellm -d litellm -q >/dev/null <<'SQL'
 insert into "LiteLLM_ProxyModelTable" (model_id, model_name, litellm_params, model_info, created_by, updated_by)
@@ -170,7 +200,7 @@ delete from "LiteLLM_ProxyModelTable" where model_id = 'probe';
 SQL
 echo "==> the app refused to boot rather than re-key"
 
-echo "==> [8/10] a key appended after a line with no trailing newline is not glued onto it"
+echo "==> [9/13] a key appended after a line with no trailing newline is not glued onto it"
 # The app is stopped by the previous check, so the volume is edited from a
 # throwaway container: the env file is left ending in someone else's key with
 # no trailing newline, which is what the appended salt could be glued onto.
@@ -183,7 +213,7 @@ wait_healthy
 [[ "$(secret OPENAI_API_KEY)" == "sk-test" ]] || fail "the previous line was corrupted"
 [[ "$(secret LITELLM_MASTER_KEY)" == "${MASTER_KEY}" ]] || fail "master key changed"
 
-echo "==> [9/10] a new LiteLLM version re-runs the migrations on the existing data"
+echo "==> [10/13] a new LiteLLM version re-runs the migrations on the existing data"
 docker rm -f "${APP}" >/dev/null
 start_app -e LITELLM_VERSION=99.0.0-next
 wait_healthy
@@ -194,7 +224,41 @@ grep -q "Applying database schema" /tmp/applog \
     || fail "the schema marker was not rewritten, so every later boot would re-migrate"
 echo "==> migrations re-ran and the marker was rewritten"
 
-echo "==> [10/10] SSO wiring points at the Cloudron provider"
+echo "==> [11/13] a failing random generator stops the boot instead of writing an empty key"
+docker rm -f "${APP}" >/dev/null
+fresh_volume
+# /dev/null over the openssl binary makes every invocation fail with 126,
+# which is the deterministic way to reach the generation error path.
+docker run --name "${APP}" --network "${NET}" \
+    --read-only --tmpfs /tmp --tmpfs /run -v "${VOL}:/app/data" \
+    -v /dev/null:/usr/bin/openssl:ro \
+    -e "CLOUDRON_POSTGRESQL_URL=postgres://litellm:litellm@${PG}:5432/litellm" \
+    -e "CLOUDRON_REDIS_HOST=${REDIS}" -e CLOUDRON_REDIS_PORT=6379 -e CLOUDRON_REDIS_PASSWORD=testpassword \
+    -e "CLOUDRON_APP_ORIGIN=http://localhost:${PORT}" \
+    "${IMAGE}" > /tmp/opensslrun 2>&1 || true
+grep -q "could not generate a random key" /tmp/opensslrun \
+    || { tail -5 /tmp/opensslrun; fail "the boot did not stop on a failed key generation"; }
+[[ -z "$(docker run --rm -v "${VOL}:/app/data" --entrypoint sh "${IMAGE}" -c \
+    'grep "^LITELLM_SALT_KEY=" /app/data/env || true')" ]] \
+    || fail "a key was written even though the generator failed"
+docker rm -f "${APP}" >/dev/null
+echo "==> the boot stopped and wrote no key"
+
+echo "==> [12/13] a database that cannot answer stops the boot rather than re-keying"
+docker run --name "${APP}" --network "${NET}" \
+    --read-only --tmpfs /tmp --tmpfs /run -v "${VOL}:/app/data" \
+    -e "CLOUDRON_POSTGRESQL_URL=postgres://litellm:litellm@no-such-host:5432/litellm" \
+    -e "CLOUDRON_REDIS_HOST=${REDIS}" -e CLOUDRON_REDIS_PORT=6379 -e CLOUDRON_REDIS_PASSWORD=testpassword \
+    -e "CLOUDRON_APP_ORIGIN=http://localhost:${PORT}" \
+    "${IMAGE}" > /tmp/nodbrun 2>&1 || true
+grep -q "database cannot be" /tmp/nodbrun || { tail -5 /tmp/nodbrun; fail "the boot did not refuse"; }
+[[ -z "$(docker run --rm -v "${VOL}:/app/data" --entrypoint sh "${IMAGE}" -c \
+    'grep "^LITELLM_SALT_KEY=" /app/data/env || true')" ]] \
+    || fail "a salt key was generated without the database being reachable"
+docker rm -f "${APP}" >/dev/null
+fresh_volume
+
+echo "==> [13/13] SSO wiring points at the Cloudron provider"
 docker rm -f "${APP}" >/dev/null
 start_app \
     -e CLOUDRON_OIDC_CLIENT_ID=testclient \

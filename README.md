@@ -4,7 +4,8 @@ A [Cloudron](https://cloudron.io) package for [LiteLLM](https://www.litellm.ai),
 source AI gateway. One OpenAI-compatible endpoint in front of 100+ model providers, with
 virtual keys, budgets, spend tracking, fallbacks and caching.
 
-Not affiliated with BerriAI. LiteLLM itself is MIT licensed; so is this package.
+Not affiliated with BerriAI. The packaging here is MIT licensed, and so is the LiteLLM code
+in the image; see `NOTICE` for what else the image contains and under which licences.
 
 ## Install
 
@@ -74,9 +75,11 @@ identically in both modes.
 | SSO | `CLOUDRON_OIDC_*` mapped to LiteLLM's generic OIDC variables |
 | Health | `/health/readiness`, which also reports the database |
 
-The app asks for 3 GB. The peak is the schema migration on a first install and
-after an update, measured at about 2.3 GB; steady-state serving is far below
-that. Lowering the limit risks the migration being killed part-way.
+The app asks for 3 GB. Measured from the container's own accounting, a first
+boot peaks at 2.66 GB and an ordinary restart at 2.47 GB, settling to about
+1.5 GB once it is serving. The peak is LiteLLM's startup rather than the
+migration, so lowering the limit risks killing an ordinary restart, not just
+an install.
 
 **`LITELLM_SALT_KEY` must never change after installation.** It encrypts the provider
 credentials stored in the database; changing it makes them unreadable.
