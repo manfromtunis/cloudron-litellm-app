@@ -93,6 +93,13 @@ start_app() {
 }
 
 # /health/readiness, unlike liveliness, reports the database as well.
+# The applied schema version is recorded in the database, not beside the app,
+# so that it cannot outlive the database it describes.
+recorded_version() {
+    docker exec "${PG}" psql -U litellm -d litellm -tAc \
+        "select value from cloudron_package_state where key = 'litellm_version'" 2>/dev/null | tr -d ' '
+}
+
 wait_healthy() {
     local i
     for i in $(seq 1 600); do
@@ -107,6 +114,18 @@ wait_healthy() {
     docker logs "${APP}" | tail -60
     fail "not healthy within 600s"
 }
+
+echo "==> [0/13] the connection URL is filtered to what libpq accepts"
+# A Prisma-style ?schema= is how LiteLLM selects a schema, and psql rejects it
+# outright — which would silently disable every check that asks the database.
+sanitized="$(docker run --rm --entrypoint /app/code/venv/bin/python "${IMAGE}" -c "
+import sys
+sys.argv = ['x', 'postgres://u:p@h:5432/db?schema=litellm&connection_limit=5&sslmode=require']
+$(sed -n '/^import sys$/,/^print(urlunsplit/p' start.sh)
+")"
+[[ "${sanitized}" == "postgres://u:p@h:5432/db?sslmode=require litellm" ]] \
+    || fail "the connection URL was not filtered as expected: ${sanitized}"
+echo "==> ?schema= became the schema, unknown parameters were dropped"
 
 echo "==> [1/13] first boot on a read-only root filesystem"
 start_app
@@ -175,8 +194,8 @@ docker run --rm -v "${VOL}:/app/data" --entrypoint sh "${IMAGE}" -c \
     'printf "LITELLM_VERSION=0.0.1-user\n" >> /app/data/env'
 docker restart "${APP}" >/dev/null
 wait_healthy
-[[ "$(docker exec "${APP}" cat /app/data/.schema-version)" != "0.0.1-user" ]] \
-    || fail "the schema marker took its version from the user's env file"
+[[ "$(recorded_version)" != "0.0.1-user" ]] \
+    || fail "the recorded schema version came from the user's env file"
 docker run --rm -v "${VOL}:/app/data" --entrypoint sh "${IMAGE}" -c \
     'grep -v "^LITELLM_VERSION=" /app/data/env > /app/data/e && mv /app/data/e /app/data/env'
 echo "==> the marker kept the image's version"
@@ -220,8 +239,8 @@ wait_healthy
 docker logs "${APP}" > /tmp/applog 2>&1
 grep -q "Applying database schema" /tmp/applog \
     || fail "a changed LiteLLM version did not re-run the migrations"
-[[ "$(docker exec "${APP}" cat /app/data/.schema-version)" == "99.0.0-next" ]] \
-    || fail "the schema marker was not rewritten, so every later boot would re-migrate"
+[[ "$(recorded_version)" == "99.0.0-next" ]] \
+    || fail "the recorded schema version was not updated, so every later boot would re-migrate"
 echo "==> migrations re-ran and the marker was rewritten"
 
 echo "==> [11/13] a failing random generator stops the boot instead of writing an empty key"

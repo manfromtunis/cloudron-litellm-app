@@ -85,8 +85,15 @@ jobs:
       - name: Refuse to overwrite a published tag
         if: steps.tag.outputs.push == 'true'
         run: |
-          if docker manifest inspect "${IMAGE}:${{ steps.tag.outputs.value }}" > /dev/null 2>&1; then
+          # Only an explicit "not found" clears the push. Any other failure —
+          # a registry error, a rate limit, an expired token — is treated as
+          # unknown rather than as permission to overwrite a release.
+          if err="$(docker manifest inspect "${IMAGE}:${{ steps.tag.outputs.value }}" 2>&1)"; then
             echo "::error::${IMAGE}:${{ steps.tag.outputs.value }} already exists. Published versions are immutable: bump the version instead."
+            exit 1
+          fi
+          if ! grep -qiE 'manifest unknown|not found|no such manifest' <<< "${err}"; then
+            echo "::error::could not determine whether ${IMAGE}:${{ steps.tag.outputs.value }} exists: ${err}"
             exit 1
           fi
 
