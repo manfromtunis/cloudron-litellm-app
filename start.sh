@@ -215,6 +215,19 @@ if [[ "$(db "select value from ${STATE_TABLE} where key = 'litellm_version'" 2>/
     echo "==> Database schema already applied for LiteLLM ${IMAGE_LITELLM_VERSION}"
 else
     echo "==> Applying database schema for LiteLLM ${IMAGE_LITELLM_VERSION}"
+    # A migration interrupted by a stop leaves a row with no finish time, and
+    # every later run then refuses to proceed (Prisma P3009) — a permanent
+    # crash loop that only a manual `migrate resolve` clears. Postgres rolls
+    # back the statements of an interrupted migration, and the two shipped
+    # migrations that cannot run in a transaction are written with IF NOT
+    # EXISTS, so dropping the record and letting it apply again is safe.
+    interrupted="$(db "select count(*) from _prisma_migrations
+        where finished_at is null and rolled_back_at is null" 2>/dev/null || true)"
+    if [[ "${interrupted}" =~ ^[0-9]+$ ]] && [[ "${interrupted}" -gt 0 ]]; then
+        echo "==> Clearing ${interrupted} interrupted migration(s) so they are applied again"
+        db "delete from _prisma_migrations
+            where finished_at is null and rolled_back_at is null" > /dev/null
+    fi
     # The trap is installed first: between starting the child and installing
     # it, this script is still PID 1 with a default disposition, which drops
     # the signal outright. The migration runs in its own process group so

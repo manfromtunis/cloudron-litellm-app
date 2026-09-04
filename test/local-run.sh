@@ -115,7 +115,7 @@ wait_healthy() {
     fail "not healthy within 600s"
 }
 
-echo "==> [0/13] the connection URL is filtered to what libpq accepts"
+echo "==> [0/14] the connection URL is filtered to what libpq accepts"
 # A Prisma-style ?schema= is how LiteLLM selects a schema, and psql rejects it
 # outright — which would silently disable every check that asks the database.
 sanitized="$(docker run --rm --entrypoint /app/code/venv/bin/python "${IMAGE}" -c "
@@ -127,7 +127,7 @@ $(sed -n '/^import sys$/,/^print(urlunsplit/p' start.sh)
     || fail "the connection URL was not filtered as expected: ${sanitized}"
 echo "==> ?schema= became the schema, unknown parameters were dropped"
 
-echo "==> [1/13] first boot on a read-only root filesystem"
+echo "==> [1/14] first boot on a read-only root filesystem"
 start_app
 wait_healthy
 
@@ -140,22 +140,22 @@ SALT_KEY="$(secret LITELLM_SALT_KEY)"
 [[ -n "${SALT_KEY}" ]] || fail "salt key not generated"
 echo "==> master key generated"
 
-echo "==> [2/13] authenticated API responds"
+echo "==> [2/14] authenticated API responds"
 code="$(curl -s -o /tmp/models.json -w '%{http_code}' \
     -H "Authorization: Bearer ${MASTER_KEY}" "http://127.0.0.1:${PORT}/models")"
 [[ "${code}" == "200" ]] || { cat /tmp/models.json; fail "/models returned ${code}"; }
 
-echo "==> [3/13] unauthenticated API is rejected"
+echo "==> [3/14] unauthenticated API is rejected"
 code="$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:${PORT}/models")"
 [[ "${code}" == "401" || "${code}" == "403" ]] || fail "/models without a key returned ${code}"
 
-echo "==> [4/13] database schema was applied"
+echo "==> [4/14] database schema was applied"
 tables="$(docker exec "${PG}" psql -U litellm -d litellm -tAc \
     "select count(*) from information_schema.tables where table_schema='public' and table_name like 'LiteLLM%'")"
 [[ "${tables}" -gt 10 ]] || fail "expected LiteLLM tables in the database, found ${tables}"
 echo "==> ${tables} LiteLLM tables present"
 
-echo "==> [5/13] the admin UI is served"
+echo "==> [5/14] the admin UI is served"
 code="$(curl -s -o /tmp/ui.html -w '%{http_code}' -L "http://127.0.0.1:${PORT}/ui")"
 [[ "${code}" == "200" ]] || fail "/ui returned ${code}"
 grep -qi '<div id="__next"\|_next/static' /tmp/ui.html || fail "/ui did not return the dashboard HTML"
@@ -175,7 +175,7 @@ docker run --rm --entrypoint /app/code/venv/bin/python "${IMAGE}" -c \
     "import importlib.util, litellm, sys; sys.exit(1 if importlib.util.find_spec('litellm_enterprise') else 0)" \
     || fail "the enterprise-licensed package is present in a published image"
 
-echo "==> [6/13] restart keeps the generated keys"
+echo "==> [6/14] restart keeps the generated keys"
 docker rm -f "${APP}" >/dev/null
 start_app
 wait_healthy
@@ -189,7 +189,7 @@ grep -q "Database schema already applied" /tmp/applog \
     || fail "restart re-ran the migrations instead of skipping them"
 echo "==> restart skipped the migrations"
 
-echo "==> [7/13] LITELLM_VERSION in the user's env file cannot suppress migrations"
+echo "==> [7/14] LITELLM_VERSION in the user's env file cannot suppress migrations"
 docker run --rm -v "${VOL}:/app/data" --entrypoint sh "${IMAGE}" -c \
     'printf "LITELLM_VERSION=0.0.1-user\n" >> /app/data/env'
 docker restart "${APP}" >/dev/null
@@ -200,7 +200,7 @@ docker run --rm -v "${VOL}:/app/data" --entrypoint sh "${IMAGE}" -c \
     'grep -v "^LITELLM_VERSION=" /app/data/env > /app/data/e && mv /app/data/e /app/data/env'
 echo "==> the marker kept the image's version"
 
-echo "==> [8/13] a regenerated salt key is refused while the database holds credentials"
+echo "==> [8/14] a regenerated salt key is refused while the database holds credentials"
 docker exec "${APP}" sh -c 'grep -v "^LITELLM_SALT_KEY=" /app/data/env > /app/data/e && mv /app/data/e /app/data/env'
 docker exec -i "${PG}" psql -U litellm -d litellm -q >/dev/null <<'SQL'
 insert into "LiteLLM_ProxyModelTable" (model_id, model_name, litellm_params, model_info, created_by, updated_by)
@@ -219,7 +219,7 @@ delete from "LiteLLM_ProxyModelTable" where model_id = 'probe';
 SQL
 echo "==> the app refused to boot rather than re-key"
 
-echo "==> [9/13] a key appended after a line with no trailing newline is not glued onto it"
+echo "==> [9/14] a key appended after a line with no trailing newline is not glued onto it"
 # The app is stopped by the previous check, so the volume is edited from a
 # throwaway container: the env file is left ending in someone else's key with
 # no trailing newline, which is what the appended salt could be glued onto.
@@ -232,7 +232,7 @@ wait_healthy
 [[ "$(secret OPENAI_API_KEY)" == "sk-test" ]] || fail "the previous line was corrupted"
 [[ "$(secret LITELLM_MASTER_KEY)" == "${MASTER_KEY}" ]] || fail "master key changed"
 
-echo "==> [10/13] a new LiteLLM version re-runs the migrations on the existing data"
+echo "==> [10/14] a new LiteLLM version re-runs the migrations on the existing data"
 docker rm -f "${APP}" >/dev/null
 start_app -e LITELLM_VERSION=99.0.0-next
 wait_healthy
@@ -243,7 +243,7 @@ grep -q "Applying database schema" /tmp/applog \
     || fail "the recorded schema version was not updated, so every later boot would re-migrate"
 echo "==> migrations re-ran and the marker was rewritten"
 
-echo "==> [11/13] a failing random generator stops the boot instead of writing an empty key"
+echo "==> [11/14] a failing random generator stops the boot instead of writing an empty key"
 docker rm -f "${APP}" >/dev/null
 fresh_volume
 # /dev/null over the openssl binary makes every invocation fail with 126,
@@ -263,7 +263,7 @@ grep -q "could not generate a random key" /tmp/opensslrun \
 docker rm -f "${APP}" >/dev/null
 echo "==> the boot stopped and wrote no key"
 
-echo "==> [12/13] a database that cannot answer stops the boot rather than re-keying"
+echo "==> [12/14] a database that cannot answer stops the boot rather than re-keying"
 docker run --name "${APP}" --network "${NET}" \
     --read-only --tmpfs /tmp --tmpfs /run -v "${VOL}:/app/data" \
     -e "CLOUDRON_POSTGRESQL_URL=postgres://litellm:litellm@no-such-host:5432/litellm" \
@@ -277,7 +277,7 @@ grep -q "database cannot be" /tmp/nodbrun || { tail -5 /tmp/nodbrun; fail "the b
 docker rm -f "${APP}" >/dev/null
 fresh_volume
 
-echo "==> [13/13] SSO wiring points at the Cloudron provider"
+echo "==> [13/14] SSO wiring points at the Cloudron provider"
 docker rm -f "${APP}" >/dev/null
 start_app \
     -e CLOUDRON_OIDC_CLIENT_ID=testclient \
@@ -295,4 +295,45 @@ grep -q 'redirect_uri=http%3A%2F%2Flocalhost%3A'"${PORT}"'%2Fsso%2Fcallback' <<<
 echo "==> SSO redirects to ${location%%\?*}"
 
 echo
+echo "==> [14/14] a migration interrupted by a stop recovers on the next boot"
+# Uses its own database so that migrations really run and can be caught
+# part-way. Interrupting one leaves a record with no finish time, which every
+# later run refuses to move past unless the package clears it.
+docker exec "${PG}" createdb -U litellm interrupted 2>/dev/null || true
+docker rm -f "${APP}" >/dev/null
+fresh_volume
+docker run -d --name "${APP}" --network "${NET}" \
+    --read-only --tmpfs /tmp --tmpfs /run -v "${VOL}:/app/data" \
+    --memory="${MEM}" --memory-swap="${MEM}" \
+    -p "127.0.0.1:${PORT}:4000" \
+    -e "CLOUDRON_POSTGRESQL_URL=postgres://litellm:litellm@${PG}:5432/interrupted" \
+    -e "CLOUDRON_REDIS_HOST=${REDIS}" -e CLOUDRON_REDIS_PORT=6379 -e CLOUDRON_REDIS_PASSWORD=testpassword \
+    -e "CLOUDRON_APP_ORIGIN=http://localhost:${PORT}" \
+    "${IMAGE}" > /dev/null
+
+# The table does not exist until the first migration lands, and a failing
+# pipeline would otherwise end the run silently under pipefail.
+applied() {
+    docker exec "${PG}" psql -U litellm -d interrupted -tAc \
+        "select count(*) from _prisma_migrations" 2>/dev/null | tr -d ' ' || true
+}
+for i in $(seq 1 200); do
+    n="$(applied)"
+    [[ "${n}" =~ ^[0-9]+$ ]] && [[ "${n}" -gt 20 ]] && break
+    [[ ${i} -eq 200 ]] && fail "migrations never started against the second database"
+    sleep 2
+done
+docker stop -t 60 "${APP}" > /dev/null
+unfinished="$(docker exec "${PG}" psql -U litellm -d interrupted -tAc \
+    "select count(*) from _prisma_migrations where finished_at is null and rolled_back_at is null" \
+    2>/dev/null | tr -d ' ' || true)"
+[[ "${unfinished}" -ge 1 ]] || fail "the stop did not actually interrupt a migration, so this check proves nothing"
+
+docker start "${APP}" > /dev/null
+wait_healthy
+docker logs "${APP}" > /tmp/applog 2>&1
+grep -q "Clearing .* interrupted migration" /tmp/applog \
+    || fail "the interrupted migration was not cleared"
+echo "==> the interrupted migration was cleared and the schema completed"
+
 echo "ALL CHECKS PASSED"
