@@ -295,7 +295,7 @@ grep -q 'redirect_uri=http%3A%2F%2Flocalhost%3A'"${PORT}"'%2Fsso%2Fcallback' <<<
 echo "==> SSO redirects to ${location%%\?*}"
 
 echo
-echo "==> [14/14] a migration interrupted by a stop recovers on the next boot"
+echo "==> [14/14] a migration interrupted part-way recovers on the next boot"
 # Uses its own database so that migrations really run and can be caught
 # part-way. Interrupting one leaves a record with no finish time, which every
 # later run refuses to move past unless the package clears it.
@@ -317,17 +317,20 @@ applied() {
     docker exec "${PG}" psql -U litellm -d interrupted -tAc \
         "select count(*) from _prisma_migrations" 2>/dev/null | tr -d ' ' || true
 }
-for i in $(seq 1 200); do
+for i in $(seq 1 400); do
     n="$(applied)"
-    [[ "${n}" =~ ^[0-9]+$ ]] && [[ "${n}" -gt 20 ]] && break
-    [[ ${i} -eq 200 ]] && fail "migrations never started against the second database"
-    sleep 2
+    [[ "${n}" =~ ^[0-9]+$ ]] && [[ "${n}" -gt 5 ]] && break
+    [[ ${i} -eq 400 ]] && fail "migrations never started against the second database"
+    sleep 1
 done
-docker stop -t 60 "${APP}" > /dev/null
+# Killed rather than stopped: a graceful stop lets the migration finish on a
+# fast machine, and then there is nothing interrupted to recover from. A kill
+# is also the real shape of the failure — an OOM, or the grace period expiring.
+docker kill "${APP}" > /dev/null
 unfinished="$(docker exec "${PG}" psql -U litellm -d interrupted -tAc \
     "select count(*) from _prisma_migrations where finished_at is null and rolled_back_at is null" \
     2>/dev/null | tr -d ' ' || true)"
-[[ "${unfinished}" -ge 1 ]] || fail "the stop did not actually interrupt a migration, so this check proves nothing"
+[[ "${unfinished}" -ge 1 ]] || fail "the kill did not interrupt a migration, so this check proves nothing"
 
 docker start "${APP}" > /dev/null
 wait_healthy
